@@ -1,10 +1,8 @@
 import { useState, useEffect, useRef, useCallback, FormEvent } from "react";
-import { UserProfile, ChatMessage, PrivateMessage, PacketLog } from "./types";
-import NetworkInspector from "./components/NetworkInspector";
+import { UserProfile, ChatMessage, PrivateMessage, MessageAttachment } from "./types";
 import PixelBoard from "./components/PixelBoard";
 import MessageBoard from "./components/MessageBoard";
 import { 
-  Cpu, 
   ShieldAlert, 
   Wifi, 
   WifiOff, 
@@ -12,7 +10,6 @@ import {
   Lock, 
   Layers, 
   User, 
-  Terminal, 
   RefreshCw, 
   Sparkles,
   KeyRound,
@@ -43,32 +40,24 @@ export default function App() {
   const [privateDMs, setPrivateDMs] = useState<Record<string, PrivateMessage[]>>({});
   const [pixelGrid, setPixelGrid] = useState<Record<string, string>>({});
   
-  // Channels and inspectors lists
+  // Channels
   const [activeChannel, setActiveChannel] = useState<"public" | string>("public");
-  const [packetLogs, setPacketLogs] = useState<PacketLog[]>([]);
-  const [currentLatency, setCurrentLatency] = useState<number | null>(null);
 
   // Connection references
   const wsRef = useRef<WebSocket | null>(null);
+  const currentUserRef = useRef<UserProfile | null>(currentUser);
+  const activeChannelRef = useRef<"public" | string>(activeChannel);
+  const reconnectEnabledRef = useRef(false);
   const reconnectAttempts = useRef(0);
   const maxReconnectAttempts = 3;
-  const pingIntervalRef = useRef<any>(null);
-  const lastPingSentRef = useRef<number | null>(null);
 
-  // Helper: Append logs to packet inspector console
-  const logPacket = useCallback((direction: "in" | "out", type: string, packetPayload: any) => {
-    const rawString = JSON.stringify({ type, payload: packetPayload });
-    setPacketLogs(prev => [
-      {
-        id: "pkt-" + Date.now() + "-" + Math.floor(Math.random() * 10000),
-        timestamp: Date.now(),
-        direction,
-        type,
-        stringified: rawString
-      },
-      ...prev
-    ].slice(0, 150)); // cap at 150 packet logs
-  }, []);
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  useEffect(() => {
+    activeChannelRef.current = activeChannel;
+  }, [activeChannel]);
 
   // REST API request to generate credentials dynamically with Roles support
   const handleAuthenticate = async (e: FormEvent) => {
@@ -117,6 +106,7 @@ export default function App() {
 
   // Exit/Revoke credentials flow
   const handleLogout = () => {
+    reconnectEnabledRef.current = false;
     if (wsRef.current) {
       wsRef.current.close();
     }
@@ -129,19 +119,24 @@ export default function App() {
     setPrivateDMs({});
     setPixelGrid({});
     setActiveChannel("public");
-    setCurrentLatency(null);
   };
 
   // Establish custom ws socket connection with authenticated payload URL
   const connectWebSocket = useCallback(() => {
     if (!token) return;
+    if (
+      wsRef.current &&
+      (wsRef.current.readyState === WebSocket.CONNECTING ||
+        wsRef.current.readyState === WebSocket.OPEN)
+    ) {
+      return;
+    }
 
     // Build correct ws links
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}?token=${token}`;
-
-    logPacket("out", "CONNECT_WS", { token: token.substring(0, 20) + "..." });
     
+    reconnectEnabledRef.current = true;
     const socket = new WebSocket(wsUrl);
     wsRef.current = socket;
     setConnectionStatus("CONNECTING");
@@ -149,28 +144,12 @@ export default function App() {
     socket.onopen = () => {
       setConnectionStatus("CONNECTED");
       reconnectAttempts.current = 0;
-      logPacket("in", "SOCKET_ESTABLISHED", { status: "Connected successfully", port: 3000 });
-
-      // Start ping heartbeat loop to calculate latency RTT
-      pingIntervalRef.current = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) {
-          const now = Date.now();
-          lastPingSentRef.current = now;
-          
-          const pingObj = { timestamp: now };
-          socket.send(JSON.stringify({ type: "PING", payload: pingObj }));
-          logPacket("out", "PING", pingObj);
-        }
-      }, 8000);
     };
 
     socket.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data);
         const { type, payload } = message;
-
-        // Log everything to inspector
-        logPacket("in", type, payload);
 
         switch (type) {
           case "INITIAL_STATE": {
@@ -179,18 +158,10 @@ export default function App() {
             setPixelGrid(payload.pixelGrid || {});
             
             // Check state setup integrity
-            if (payload.userId && currentUser) {
-              const enrichedUser = { ...currentUser, userId: payload.userId };
+            if (payload.userId && currentUserRef.current) {
+              const enrichedUser = { ...currentUserRef.current, userId: payload.userId };
               setCurrentUser(enrichedUser);
               sessionStorage.setItem("ws_jwt_user", JSON.stringify(enrichedUser));
-            }
-            break;
-          }
-
-          case "PONG": {
-            if (lastPingSentRef.current) {
-              const rtt = Date.now() - lastPingSentRef.current;
-              setCurrentLatency(rtt);
             }
             break;
           }
@@ -235,9 +206,15 @@ export default function App() {
             break;
           }
 
+          case "PUBLIC_MESSAGE_UPDATED": {
+            setPublicMessages(prev => prev.map(msg => msg.id === payload.id ? payload : msg));
+            break;
+          }
+
           case "PRIVATE_MESSAGE": {
             // Find whether the current user is sender or receiver to group accurately
-            const otherUserId = payload.senderId === currentUser?.userId ? payload.recipientId : payload.senderId;
+            const otherUserId =
+              payload.senderId === currentUserRef.current?.userId ? payload.recipientId : payload.senderId;
             
             setPrivateDMs(prev => {
               const currentList = prev[otherUserId] || [];
@@ -254,9 +231,20 @@ export default function App() {
             });
 
             // Automatically open secure DM view/focus tab if we receive a message from another person
-            if (payload.senderId !== currentUser?.userId && activeChannel === "public") {
+            if (payload.senderId !== currentUserRef.current?.userId && activeChannelRef.current === "public") {
               setActiveChannel(`dm:${payload.senderId}`);
             }
+            break;
+          }
+
+          case "PRIVATE_MESSAGE_UPDATED": {
+            const otherUserId =
+              payload.senderId === currentUserRef.current?.userId ? payload.recipientId : payload.senderId;
+
+            setPrivateDMs(prev => ({
+              ...prev,
+              [otherUserId]: (prev[otherUserId] || []).map(msg => msg.id === payload.id ? payload : msg)
+            }));
             break;
           }
 
@@ -314,27 +302,29 @@ export default function App() {
     };
 
     socket.onclose = (event) => {
-      // Clear timers
-      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
-      
-      logPacket("in", "SOCKET_CLOSED", { code: event.code, reason: event.reason || "Automatic socket shutdown" });
+      if (wsRef.current === socket) {
+        wsRef.current = null;
+      }
+
+      if (!reconnectEnabledRef.current) {
+        return;
+      }
 
       // Identify whether token was rejected/expired (typical standard 4401 or proxy codes)
       if (event.code === 4100 || event.reason.includes("expiré") || event.reason.includes("Jeton expiré")) {
         setConnectionStatus("EXPIRED");
-        wsRef.current = null;
+        reconnectEnabledRef.current = false;
         return;
       }
 
       setConnectionStatus("DISCONNECTED");
-      wsRef.current = null;
 
       // Handle custom exponential backoff auto reconnect loop
       if (reconnectAttempts.current < maxReconnectAttempts) {
         reconnectAttempts.current += 1;
         const delay = reconnectAttempts.current * 3000;
         setTimeout(() => {
-          if (token && connectionStatus !== "IDLE" && connectionStatus !== "EXPIRED") {
+          if (token && reconnectEnabledRef.current) {
             connectWebSocket();
           }
         }, delay);
@@ -345,16 +335,20 @@ export default function App() {
       console.error("WS transport socket error occurrence:", e);
     };
 
-  }, [token, currentUser, activeChannel, logPacket]);
+  }, [token]);
 
   // Hook connection to token
   useEffect(() => {
     if (token) {
+      reconnectEnabledRef.current = true;
       connectWebSocket();
     }
     return () => {
-      if (wsRef.current) wsRef.current.close();
-      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      reconnectEnabledRef.current = false;
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
   }, [token, connectWebSocket]);
 
@@ -362,16 +356,31 @@ export default function App() {
   const sendWSMessage = useCallback((type: string, payload: any) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type, payload }));
-      logPacket("out", type, payload);
     }
-  }, [logPacket]);
+  }, []);
 
   // Chat callbacks
-  const handleChatSendMessage = (text: string, recipientId?: string) => {
+  const handleChatSendMessage = (text: string, recipientId?: string, attachment?: MessageAttachment) => {
     if (recipientId) {
-      sendWSMessage("SEND_PRIVATE_MESSAGE", { text, recipientId });
+      sendWSMessage("SEND_PRIVATE_MESSAGE", { text, recipientId, attachment });
     } else {
-      sendWSMessage("SEND_PUBLIC_MESSAGE", { text });
+      sendWSMessage("SEND_PUBLIC_MESSAGE", { text, attachment });
+    }
+  };
+
+  const handleEditMessage = (messageId: string, text: string, recipientId?: string) => {
+    if (recipientId) {
+      sendWSMessage("EDIT_PRIVATE_MESSAGE", { messageId, text, recipientId });
+    } else {
+      sendWSMessage("EDIT_PUBLIC_MESSAGE", { messageId, text });
+    }
+  };
+
+  const handleDeleteMessage = (messageId: string, recipientId?: string) => {
+    if (recipientId) {
+      sendWSMessage("DELETE_PRIVATE_MESSAGE", { messageId, recipientId });
+    } else {
+      sendWSMessage("DELETE_PUBLIC_MESSAGE", { messageId });
     }
   };
 
@@ -548,10 +557,10 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-sm font-bold text-slate-900 leading-none flex items-center gap-1.5">
-                Pixel-Art & Messagerie WebSockets
+                My app 
               </h1>
               <span className="text-[10px] text-slate-500 block mt-0.5">
-                Double canneaux (Général + DM) et Jeton cryptographique JWT
+                Serveur asynchrone sécurisé
               </span>
             </div>
           </div>
@@ -657,6 +666,8 @@ export default function App() {
               activeChannel={activeChannel}
               onChangeChannel={handleChannelSwitch}
               onSendMessage={handleChatSendMessage}
+              onEditMessage={handleEditMessage}
+              onDeleteMessage={handleDeleteMessage}
               onStartDM={handleStartDM}
             />
           </div>
@@ -664,13 +675,6 @@ export default function App() {
         </div>
 
       </main>
-
-      {/* Live web socket JSON frame inspector (at screen bottom) */}
-      <NetworkInspector
-        logs={packetLogs}
-        onClear={() => setPacketLogs([])}
-        latency={currentLatency}
-      />
     </div>
   );
 }

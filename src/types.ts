@@ -11,7 +11,10 @@ export interface ChatMessage {
   senderName: string;
   senderColor: string;
   text: string;
+  attachment?: MessageAttachment;
   timestamp: number;
+  editedAt?: number;
+  deleted?: boolean;
 }
 
 export interface PrivateMessage extends ChatMessage {
@@ -19,10 +22,8 @@ export interface PrivateMessage extends ChatMessage {
   recipientId: string;
 }
 
-export interface PacketLog {
-  id: string;
-  timestamp: number;
-  direction: "in" | "out";
-  type: string;
-  stringified: string;
+export interface MessageAttachment {
+  type: "image";
+  name: string;
+  dataUrl: string;
 }

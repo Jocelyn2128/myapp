@@ -83,7 +83,14 @@ const publicChatHistory: Array<{
   senderName: string;
   senderColor: string;
   text: string;
+  attachment?: {
+    type: "image";
+    name: string;
+    dataUrl: string;
+  };
   timestamp: number;
+  editedAt?: number;
+  deleted?: boolean;
 }> = [
   {
     id: "init-msg-1",
@@ -102,9 +109,16 @@ const privateChatHistory = new Map<string, Array<{
   senderName: string;
   senderColor: string;
   text: string;
+  attachment?: {
+    type: "image";
+    name: string;
+    dataUrl: string;
+  };
   roomId: string;
   recipientId: string;
   timestamp: number;
+  editedAt?: number;
+  deleted?: boolean;
 }>>();
 
 // Collaborative grid state: coordinates (x,y) to hex codes
@@ -248,12 +262,14 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
         }
         
         case "SEND_PUBLIC_MESSAGE": {
+          const attachment = payload.attachment?.type === "image" ? payload.attachment : undefined;
           const newMsg = {
             id: "msg-pub-" + Date.now() + "-" + Math.floor(Math.random() * 1000),
             senderId: userId,
             senderName: username,
             senderColor: color,
             text: payload.text || "",
+            ...(attachment ? { attachment } : {}),
             timestamp: Date.now()
           };
           publicChatHistory.push(newMsg);
@@ -262,11 +278,45 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
           broadcastToAll("PUBLIC_MESSAGE", newMsg);
           break;
         }
+
+        case "EDIT_PUBLIC_MESSAGE": {
+          const messageId = payload.messageId;
+          const nextText = typeof payload.text === "string" ? payload.text.trim() : "";
+          const targetMsg = publicChatHistory.find(msg => msg.id === messageId);
+
+          if (!targetMsg || targetMsg.senderId !== userId || targetMsg.deleted || !nextText) {
+            ws.send(buildWSEvent("ERROR", { message: "Modification impossible pour ce message." }));
+            break;
+          }
+
+          targetMsg.text = nextText;
+          targetMsg.editedAt = Date.now();
+          broadcastToAll("PUBLIC_MESSAGE_UPDATED", targetMsg);
+          break;
+        }
+
+        case "DELETE_PUBLIC_MESSAGE": {
+          const messageId = payload.messageId;
+          const targetMsg = publicChatHistory.find(msg => msg.id === messageId);
+
+          if (!targetMsg || targetMsg.senderId !== userId || targetMsg.deleted) {
+            ws.send(buildWSEvent("ERROR", { message: "Suppression impossible pour ce message." }));
+            break;
+          }
+
+          targetMsg.text = "";
+          delete targetMsg.attachment;
+          targetMsg.deleted = true;
+          targetMsg.editedAt = Date.now();
+          broadcastToAll("PUBLIC_MESSAGE_UPDATED", targetMsg);
+          break;
+        }
         
         case "SEND_PRIVATE_MESSAGE": {
           const recipientId = payload.recipientId;
           const target = connectedClients.get(recipientId);
           const chatKey = getPrivateChatKey(userId, recipientId);
+          const attachment = payload.attachment?.type === "image" ? payload.attachment : undefined;
           
           const dmMsg = {
             id: "msg-priv-" + Date.now() + "-" + Math.floor(Math.random() * 1000),
@@ -274,6 +324,7 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
             senderName: username,
             senderColor: color,
             text: payload.text || "",
+            ...(attachment ? { attachment } : {}),
             roomId: "private",
             recipientId: recipientId,
             timestamp: Date.now()
@@ -291,6 +342,55 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
           }
           // Send copy to sender for immediate confirmation
           ws.send(buildWSEvent("PRIVATE_MESSAGE", dmMsg));
+          break;
+        }
+
+        case "EDIT_PRIVATE_MESSAGE": {
+          const messageId = payload.messageId;
+          const recipientId = payload.recipientId;
+          const nextText = typeof payload.text === "string" ? payload.text.trim() : "";
+          const chatKey = getPrivateChatKey(userId, recipientId);
+          const history = privateChatHistory.get(chatKey) || [];
+          const targetMsg = history.find(msg => msg.id === messageId);
+
+          if (!targetMsg || targetMsg.senderId !== userId || targetMsg.deleted || !nextText) {
+            ws.send(buildWSEvent("ERROR", { message: "Modification impossible pour ce message privé." }));
+            break;
+          }
+
+          targetMsg.text = nextText;
+          targetMsg.editedAt = Date.now();
+
+          const target = connectedClients.get(recipientId);
+          if (target && target.ws.readyState === WebSocket.OPEN) {
+            target.ws.send(buildWSEvent("PRIVATE_MESSAGE_UPDATED", targetMsg));
+          }
+          ws.send(buildWSEvent("PRIVATE_MESSAGE_UPDATED", targetMsg));
+          break;
+        }
+
+        case "DELETE_PRIVATE_MESSAGE": {
+          const messageId = payload.messageId;
+          const recipientId = payload.recipientId;
+          const chatKey = getPrivateChatKey(userId, recipientId);
+          const history = privateChatHistory.get(chatKey) || [];
+          const targetMsg = history.find(msg => msg.id === messageId);
+
+          if (!targetMsg || targetMsg.senderId !== userId || targetMsg.deleted) {
+            ws.send(buildWSEvent("ERROR", { message: "Suppression impossible pour ce message privé." }));
+            break;
+          }
+
+          targetMsg.text = "";
+          delete targetMsg.attachment;
+          targetMsg.deleted = true;
+          targetMsg.editedAt = Date.now();
+
+          const target = connectedClients.get(recipientId);
+          if (target && target.ws.readyState === WebSocket.OPEN) {
+            target.ws.send(buildWSEvent("PRIVATE_MESSAGE_UPDATED", targetMsg));
+          }
+          ws.send(buildWSEvent("PRIVATE_MESSAGE_UPDATED", targetMsg));
           break;
         }
         

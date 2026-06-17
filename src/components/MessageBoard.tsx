@@ -1,6 +1,20 @@
 import React, { useState, useRef, useEffect } from "react";
-import { ChatMessage, PrivateMessage, UserProfile } from "../types";
-import { MessageSquare, Send, Users, Shield, ArrowRight, UserCheck } from "lucide-react";
+import { ChatMessage, MessageAttachment, PrivateMessage, UserProfile } from "../types";
+import {
+  ArrowRight,
+  Camera,
+  Check,
+  Pencil,
+  MessageSquare,
+  Mic,
+  Paperclip,
+  Send,
+  Shield,
+  Smile,
+  Trash2,
+  Users,
+  X
+} from "lucide-react";
 
 interface MessageBoardProps {
   currentUser: UserProfile;
@@ -9,9 +23,17 @@ interface MessageBoardProps {
   privateDMs: Record<string, PrivateMessage[]>; // keyed by custom userId
   activeChannel: "public" | string; // 'public' or 'dm:userId'
   onChangeChannel: (chan: "public" | string) => void;
-  onSendMessage: (text: string, recipientId?: string) => void;
+  onSendMessage: (text: string, recipientId?: string, attachment?: MessageAttachment) => void;
+  onEditMessage: (messageId: string, text: string, recipientId?: string) => void;
+  onDeleteMessage: (messageId: string, recipientId?: string) => void;
   onStartDM: (otherUserId: string) => void;
 }
+
+const EMOJI_OPTIONS = [
+  "😀", "😂", "😍", "🥰", "😎", "😭", "😡", "👍",
+  "🙏", "👏", "🔥", "❤️", "💔", "✨", "🎉", "✅",
+  "👋", "🤝", "💪", "🚀", "📸", "🎨", "💬", "🔒"
+];
 
 export default function MessageBoard({
   currentUser,
@@ -21,10 +43,20 @@ export default function MessageBoard({
   activeChannel,
   onChangeChannel,
   onSendMessage,
+  onEditMessage,
+  onDeleteMessage,
   onStartDM
 }: MessageBoardProps) {
   const [inputText, setInputText] = useState("");
+  const [attachment, setAttachment] = useState<MessageAttachment | undefined>();
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const messageInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
 
   // Auto scroll to bottom on message
   useEffect(() => {
@@ -35,15 +67,84 @@ export default function MessageBoard({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim()) return;
+    const trimmedText = inputText.trim();
+    if (!trimmedText && !attachment) return;
 
     if (activeChannel === "public") {
-      onSendMessage(inputText.trim());
+      onSendMessage(trimmedText, undefined, attachment);
     } else if (activeChannel.startsWith("dm:")) {
       const recipientId = activeChannel.substring(3);
-      onSendMessage(inputText.trim(), recipientId);
+      onSendMessage(trimmedText, recipientId, attachment);
     }
     setInputText("");
+    setAttachment(undefined);
+    setFileError(null);
+    setShowEmojiPicker(false);
+  };
+
+  const handleEmojiSelect = (emoji: string) => {
+    setInputText(prev => `${prev}${emoji}`);
+    setShowEmojiPicker(false);
+    messageInputRef.current?.focus();
+  };
+
+  const handleImageSelect = (file?: File) => {
+    if (!file) return;
+    setFileError(null);
+
+    if (!file.type.startsWith("image/")) {
+      setFileError("Veuillez choisir une image.");
+      return;
+    }
+
+    if (file.size > 2 * 1024 * 1024) {
+      setFileError("Image trop grande. Taille maximale : 2 Mo.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        setAttachment({
+          type: "image",
+          name: file.name,
+          dataUrl: reader.result
+        });
+      }
+    };
+    reader.onerror = () => setFileError("Impossible de lire cette image.");
+    reader.readAsDataURL(file);
+  };
+
+  const getActiveRecipientId = () => {
+    return activeChannel.startsWith("dm:") ? activeChannel.substring(3) : undefined;
+  };
+
+  const startEditingMessage = (message: ChatMessage | PrivateMessage) => {
+    if (message.deleted) return;
+    setEditingMessageId(message.id);
+    setEditingText(message.text);
+    setShowEmojiPicker(false);
+  };
+
+  const cancelEditingMessage = () => {
+    setEditingMessageId(null);
+    setEditingText("");
+  };
+
+  const submitEditMessage = () => {
+    const trimmedText = editingText.trim();
+    if (!editingMessageId || !trimmedText) return;
+
+    onEditMessage(editingMessageId, trimmedText, getActiveRecipientId());
+    cancelEditingMessage();
+  };
+
+  const deleteMessage = (messageId: string) => {
+    onDeleteMessage(messageId, getActiveRecipientId());
+    if (editingMessageId === messageId) {
+      cancelEditingMessage();
+    }
   };
 
   // Extract active DM lists to display tabs for
@@ -210,11 +311,12 @@ export default function MessageBoard({
                 hour: "2-digit",
                 minute: "2-digit"
               });
+              const isEditingThis = editingMessageId === msg.id;
 
               return (
                 <div 
                   key={msg.id} 
-                  className={`flex flex-col ${belongsToMe ? "items-end" : "items-start"}`}
+                  className={`group flex flex-col ${belongsToMe ? "items-end" : "items-start"}`}
                 >
                   <div className="flex items-center gap-1.5 mb-0.5">
                     {!belongsToMe && (
@@ -230,14 +332,94 @@ export default function MessageBoard({
                     </span>
                   </div>
                   
-                  <div 
-                    className={`px-3 py-2 rounded-2xl max-w-[85%] text-xs shadow-sm break-words ${
-                      belongsToMe 
-                        ? "bg-slate-900 text-white rounded-tr-none" 
-                        : "bg-white text-slate-800 rounded-tl-none border border-slate-100"
-                    }`}
-                  >
-                    <p className="leading-relaxed">{msg.text}</p>
+                  <div className={`flex items-end gap-1.5 ${belongsToMe ? "flex-row-reverse" : ""}`}>
+                    <div 
+                      className={`px-3 py-2 rounded-2xl max-w-[85%] text-xs shadow-sm break-words space-y-2 ${
+                        belongsToMe 
+                          ? "bg-slate-900 text-white rounded-tr-none" 
+                          : "bg-white text-slate-800 rounded-tl-none border border-slate-100"
+                      }`}
+                    >
+                      {msg.deleted ? (
+                        <p className={`italic ${belongsToMe ? "text-slate-300" : "text-slate-400"}`}>
+                          Message supprimé
+                        </p>
+                      ) : isEditingThis ? (
+                        <div className="flex min-w-[220px] items-center gap-2">
+                          <input
+                            value={editingText}
+                            onChange={(e) => setEditingText(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") submitEditMessage();
+                              if (e.key === "Escape") cancelEditingMessage();
+                            }}
+                            className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-900 outline-none focus:border-emerald-400"
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            onClick={submitEditMessage}
+                            className="rounded-full bg-emerald-500 p-1 text-white hover:bg-emerald-600"
+                            title="Valider"
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelEditingMessage}
+                            className="rounded-full bg-slate-200 p-1 text-slate-700 hover:bg-slate-300"
+                            title="Annuler"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          {msg.attachment?.type === "image" && (
+                            <a
+                              href={msg.attachment.dataUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="block overflow-hidden rounded-xl border border-black/10 bg-black/5"
+                              title={msg.attachment.name}
+                            >
+                              <img
+                                src={msg.attachment.dataUrl}
+                                alt={msg.attachment.name || "Image envoyée"}
+                                className="max-h-52 w-full max-w-xs object-cover"
+                              />
+                            </a>
+                          )}
+                          {msg.text && <p className="leading-relaxed">{msg.text}</p>}
+                          {msg.editedAt && (
+                            <p className={`text-[9px] ${belongsToMe ? "text-slate-300" : "text-slate-400"}`}>
+                              modifié
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+
+                    {belongsToMe && !msg.deleted && !isEditingThis && (
+                      <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
+                        <button
+                          type="button"
+                          onClick={() => startEditingMessage(msg)}
+                          className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 shadow-sm hover:text-emerald-600"
+                          title="Modifier"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteMessage(msg.id)}
+                          className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 shadow-sm hover:text-red-600"
+                          title="Supprimer"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -248,26 +430,122 @@ export default function MessageBoard({
         {/* Reply Submission Field */}
         <form 
           onSubmit={handleSubmit} 
-          className="p-2 border-t border-slate-100 flex items-center bg-slate-50 gap-2 shrink-0"
+          className="p-2 border-t border-slate-100 bg-slate-50 shrink-0"
         >
-          <input
-            type="text"
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            placeholder={
-              activeChannel === "public"
-                ? "Envoyer un message général..."
-                : `Écrire un message privé sécurisé...`
-            }
-            className="flex-1 bg-white border border-slate-200 rounded-xl px-4 py-2 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:border-slate-300 focus:ring-1 focus:ring-slate-300 focus:bg-white"
-          />
-          <button
-            type="submit"
-            className="p-2 bg-slate-900 border border-slate-950 text-white rounded-xl hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
-            title="Envoyer"
-          >
-            <Send className="w-3.5 h-3.5" />
-          </button>
+          {attachment && (
+            <div className="mb-2 flex items-center gap-2 rounded-2xl border border-emerald-100 bg-emerald-50 p-2">
+              <img
+                src={attachment.dataUrl}
+                alt={attachment.name}
+                className="h-12 w-12 rounded-xl object-cover"
+              />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-semibold text-emerald-900">{attachment.name}</p>
+                <p className="text-[10px] text-emerald-700">Photo prête à envoyer</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAttachment(undefined)}
+                className="rounded-full p-1 text-emerald-700 hover:bg-emerald-100"
+                title="Retirer la photo"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
+          {fileError && (
+            <p className="mb-2 rounded-lg bg-red-50 px-3 py-2 text-[11px] font-medium text-red-600">
+              {fileError}
+            </p>
+          )}
+
+          <div className="flex items-center gap-2">
+            <div className="relative flex min-w-0 flex-1 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 shadow-sm">
+              {showEmojiPicker && (
+                <div className="absolute bottom-14 left-0 z-20 grid w-64 grid-cols-8 gap-1 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                  {EMOJI_OPTIONS.map(emoji => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => handleEmojiSelect(emoji)}
+                      className="flex h-8 w-8 items-center justify-center rounded-lg text-lg transition-colors hover:bg-slate-100"
+                      title={`Ajouter ${emoji}`}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setShowEmojiPicker(prev => !prev)}
+                className={`rounded-full p-1 transition-colors ${
+                  showEmojiPicker ? "bg-emerald-50 text-emerald-600" : "text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                }`}
+                title="Ajouter un emoji"
+              >
+                <Smile className="h-5 w-5" />
+              </button>
+              <input
+                ref={messageInputRef}
+                type="text"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder="Message"
+                className="min-w-0 flex-1 bg-transparent text-sm text-slate-800 placeholder-slate-500 outline-none"
+              />
+              <input
+                ref={galleryInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  handleImageSelect(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={cameraInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                onChange={(e) => {
+                  handleImageSelect(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => galleryInputRef.current?.click()}
+                className="rounded-full p-1 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                title="Joindre une photo"
+              >
+                <Paperclip className="h-5 w-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => cameraInputRef.current?.click()}
+                className="rounded-full p-1 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                title="Prendre une photo"
+              >
+                <Camera className="h-5 w-5" />
+              </button>
+            </div>
+            <button
+              type="submit"
+              className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm transition-colors hover:bg-emerald-600"
+              title={inputText.trim() || attachment ? "Envoyer" : "Message vocal"}
+            >
+              {inputText.trim() || attachment ? (
+                <Send className="h-5 w-5" />
+              ) : (
+                <Mic className="h-6 w-6" />
+              )}
+            </button>
+          </div>
         </form>
 
       </div>
