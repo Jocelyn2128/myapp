@@ -1,0 +1,6 @@
+{
+  "name": "Collaborative Board & DM Chat",
+  "description": "Interactive whiteboard and dual chat with real-time websocket protocol inspector and custom JWT signatures.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
