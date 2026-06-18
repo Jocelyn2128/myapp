@@ -1,10 +1,14 @@
 import React, { useState, useRef, useEffect } from "react";
-import { ChatMessage, MessageAttachment, PrivateMessage, UserProfile } from "../types";
+import { ChatMessage, MessageAttachment, MessageReply, PrivateMessage, UserProfile } from "../types";
 import {
   ArrowRight,
   Camera,
   Check,
+  Copy,
+  MoreHorizontal,
   Pencil,
+  Pin,
+  Reply,
   MessageSquare,
   Mic,
   Paperclip,
@@ -23,10 +27,11 @@ interface MessageBoardProps {
   privateDMs: Record<string, PrivateMessage[]>; // keyed by custom userId
   activeChannel: "public" | string; // 'public' or 'dm:userId'
   onChangeChannel: (chan: "public" | string) => void;
-  onSendMessage: (text: string, recipientId?: string, attachment?: MessageAttachment) => void;
+  onSendMessage: (text: string, recipientId?: string, attachment?: MessageAttachment, replyTo?: MessageReply) => void;
   onEditMessage: (messageId: string, text: string, recipientId?: string) => void;
   onDeleteMessage: (messageId: string, recipientId?: string) => void;
   onReactMessage: (messageId: string, emoji: string, recipientId?: string) => void;
+  onPinMessage: (messageId: string, recipientId?: string) => void;
   onStartDM: (otherUserId: string) => void;
 }
 
@@ -49,6 +54,7 @@ export default function MessageBoard({
   onEditMessage,
   onDeleteMessage,
   onReactMessage,
+  onPinMessage,
   onStartDM
 }: MessageBoardProps) {
   const [inputText, setInputText] = useState("");
@@ -58,6 +64,9 @@ export default function MessageBoard({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
+  const [imagePreview, setImagePreview] = useState<MessageAttachment | null>(null);
+  const [replyingTo, setReplyingTo] = useState<MessageReply | undefined>();
+  const [actionMenuMessageId, setActionMenuMessageId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const messageInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
@@ -70,19 +79,33 @@ export default function MessageBoard({
     }
   }, [publicMessages, privateDMs, activeChannel]);
 
+  useEffect(() => {
+    if (!imagePreview) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setImagePreview(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [imagePreview]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedText = inputText.trim();
     if (!trimmedText && !attachment) return;
 
     if (activeChannel === "public") {
-      onSendMessage(trimmedText, undefined, attachment);
+      onSendMessage(trimmedText, undefined, attachment, replyingTo);
     } else if (activeChannel.startsWith("dm:")) {
       const recipientId = activeChannel.substring(3);
-      onSendMessage(trimmedText, recipientId, attachment);
+      onSendMessage(trimmedText, recipientId, attachment, replyingTo);
     }
     setInputText("");
     setAttachment(undefined);
+    setReplyingTo(undefined);
     setFileError(null);
     setShowEmojiPicker(false);
   };
@@ -155,6 +178,36 @@ export default function MessageBoard({
   const reactToMessage = (messageId: string, emoji: string) => {
     onReactMessage(messageId, emoji, getActiveRecipientId());
     setReactionPickerMessageId(null);
+    setActionMenuMessageId(null);
+  };
+
+  const buildReply = (message: ChatMessage | PrivateMessage): MessageReply => ({
+    messageId: message.id,
+    senderName: message.senderName,
+    text: message.text || (message.attachment ? "Photo" : "Message"),
+    ...(message.attachment ? { attachmentName: message.attachment.name } : {})
+  });
+
+  const startReply = (message: ChatMessage | PrivateMessage) => {
+    if (message.deleted) return;
+    setReplyingTo(buildReply(message));
+    setActionMenuMessageId(null);
+    messageInputRef.current?.focus();
+  };
+
+  const copyMessage = async (message: ChatMessage | PrivateMessage) => {
+    if (!message.text) return;
+    try {
+      await navigator.clipboard.writeText(message.text);
+    } catch {
+      setFileError("Impossible de copier ce message.");
+    }
+    setActionMenuMessageId(null);
+  };
+
+  const pinMessage = (messageId: string) => {
+    onPinMessage(messageId, getActiveRecipientId());
+    setActionMenuMessageId(null);
   };
 
   // Extract active DM lists to display tabs for
@@ -181,6 +234,7 @@ export default function MessageBoard({
   };
 
   const currentMessages = getMessagesToRender();
+  const pinnedMessages = currentMessages.filter(msg => msg.pinned && !msg.deleted);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200/80 shadow-sm min-h-[480px]">
@@ -299,6 +353,31 @@ export default function MessageBoard({
           })}
         </div>
 
+        {pinnedMessages.length > 0 && (
+          <div className="border-b border-emerald-100 bg-emerald-50/70 px-3 py-2">
+            <div className="mb-1 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-emerald-700">
+              <Pin className="h-3.5 w-3.5" />
+              <span>Messages épinglés</span>
+            </div>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {pinnedMessages.map(message => (
+                <button
+                  key={message.id}
+                  type="button"
+                  onClick={() => setReplyingTo(buildReply(message))}
+                  className="max-w-[220px] shrink-0 rounded-lg border border-emerald-100 bg-white px-3 py-2 text-left shadow-sm"
+                  title="Utiliser comme réponse"
+                >
+                  <p className="truncate text-[11px] font-bold text-emerald-800">{message.senderName}</p>
+                  <p className="truncate text-[11px] text-slate-600">
+                    {message.text || message.attachment?.name || "Message"}
+                  </p>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Message Logs Area */}
         <div 
           ref={scrollRef} 
@@ -385,23 +464,42 @@ export default function MessageBoard({
                             <X className="h-3.5 w-3.5" />
                           </button>
                         </div>
-                      ) : (
-                        <>
-                          {msg.attachment?.type === "image" && (
-                            <a
-                              href={msg.attachment.dataUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="block overflow-hidden rounded-xl border border-black/10 bg-black/5"
-                              title={msg.attachment.name}
-                            >
-                              <img
-                                src={msg.attachment.dataUrl}
-                                alt={msg.attachment.name || "Image envoyée"}
-                                className="max-h-52 w-full max-w-xs object-cover"
-                              />
-                            </a>
-                          )}
+	                      ) : (
+	                        <>
+                            {msg.pinned && (
+                              <div className={`flex items-center gap-1 text-[10px] font-semibold ${belongsToMe ? "text-emerald-100" : "text-emerald-700"}`}>
+                                <Pin className="h-3 w-3" />
+                                <span>Épinglé</span>
+                              </div>
+                            )}
+                            {msg.replyTo && (
+                              <div className={`rounded-lg border-l-4 px-2 py-1.5 ${
+                                belongsToMe
+                                  ? "border-emerald-200 bg-emerald-950/20"
+                                  : "border-emerald-400 bg-slate-50"
+                              }`}>
+                                <p className={`text-[10px] font-bold ${belongsToMe ? "text-emerald-100" : "text-emerald-700"}`}>
+                                  {msg.replyTo.senderName}
+                                </p>
+                                <p className={`max-h-8 overflow-hidden text-[11px] ${belongsToMe ? "text-emerald-50/80" : "text-slate-500"}`}>
+                                  {msg.replyTo.text || msg.replyTo.attachmentName || "Message"}
+                                </p>
+                              </div>
+                            )}
+	                          {msg.attachment?.type === "image" && (
+	                            <button
+	                              type="button"
+	                              onClick={() => setImagePreview(msg.attachment || null)}
+	                              className="block overflow-hidden rounded-xl border border-black/10 bg-black/5 cursor-zoom-in"
+	                              title="Afficher en plein écran"
+	                            >
+	                              <img
+	                                src={msg.attachment.dataUrl}
+	                                alt={msg.attachment.name || "Image envoyée"}
+	                                className="max-h-52 w-full max-w-xs object-cover"
+	                              />
+	                            </button>
+	                          )}
                           {msg.text && <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
                           <div className={`flex items-center justify-end gap-1 text-[10px] ${belongsToMe ? "text-emerald-100/80" : "text-slate-400"}`}>
                             {msg.editedAt && <span>modifié</span>}
@@ -414,7 +512,7 @@ export default function MessageBoard({
                     {!msg.deleted && !isEditingThis && (
                       <div className="relative flex items-center gap-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
                         {reactionPickerMessageId === msg.id && (
-                          <div className={`absolute bottom-8 z-20 flex gap-1 rounded-full border border-slate-200 bg-white p-1.5 shadow-xl ${belongsToMe ? "right-0" : "left-0"}`}>
+                          <div className={`absolute bottom-8 z-30 flex gap-1 rounded-full border border-slate-200 bg-white p-1.5 shadow-xl ${belongsToMe ? "right-0" : "left-0"}`}>
                             {MESSAGE_REACTIONS.map(emoji => (
                               <button
                                 key={emoji}
@@ -428,34 +526,85 @@ export default function MessageBoard({
                             ))}
                           </div>
                         )}
-                        <button
-                          type="button"
-                          onClick={() => setReactionPickerMessageId(prev => prev === msg.id ? null : msg.id)}
-                          className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 shadow-sm hover:text-emerald-600"
-                          title="Réagir"
-                        >
-                          <Smile className="h-3.5 w-3.5" />
-                        </button>
-                        {belongsToMe && (
-                          <>
-                        <button
-                          type="button"
-                          onClick={() => startEditingMessage(msg)}
-                          className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 shadow-sm hover:text-emerald-600"
-                          title="Modifier"
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => deleteMessage(msg.id)}
-                          className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 shadow-sm hover:text-red-600"
-                          title="Supprimer"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                          </>
+
+                        {actionMenuMessageId === msg.id && (
+                          <div className={`absolute top-8 z-30 w-56 overflow-hidden rounded-2xl border border-slate-200 bg-white py-1 text-left shadow-xl ${belongsToMe ? "right-0" : "left-0"}`}>
+                            <button
+                              type="button"
+                              onClick={() => startReply(msg)}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              <Reply className="h-4 w-4" />
+                              Répondre
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => copyMessage(msg)}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              <Copy className="h-4 w-4" />
+                              Copier
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setReactionPickerMessageId(msg.id);
+                                setActionMenuMessageId(null);
+                              }}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              <Smile className="h-4 w-4" />
+                              Réagir
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => pinMessage(msg.id)}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              <Pin className="h-4 w-4" />
+                              {msg.pinned ? "Désépingler" : "Épingler"}
+                            </button>
+                            {belongsToMe && (
+                              <>
+                                <div className="my-1 border-t border-slate-100" />
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    startEditingMessage(msg);
+                                    setActionMenuMessageId(null);
+                                  }}
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                  Modifier
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    deleteMessage(msg.id);
+                                    setActionMenuMessageId(null);
+                                  }}
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                  Supprimer
+                                </button>
+                              </>
+                            )}
+                          </div>
                         )}
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActionMenuMessageId(prev => prev === msg.id ? null : msg.id);
+                            setReactionPickerMessageId(null);
+                          }}
+                          className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 shadow-sm hover:text-emerald-600"
+                          title="Actions"
+                        >
+                          <MoreHorizontal className="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     )}
                   </div>
@@ -490,6 +639,28 @@ export default function MessageBoard({
           onSubmit={handleSubmit} 
           className="p-2 border-t border-slate-100 bg-slate-50 shrink-0"
         >
+          {replyingTo && (
+            <div className="mb-2 flex items-start gap-2 rounded-2xl border border-emerald-100 bg-white p-2 shadow-sm">
+              <div className="mt-0.5 h-10 w-1 rounded-full bg-emerald-500" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-bold text-emerald-700">
+                  Réponse à {replyingTo.senderName}
+                </p>
+                <p className="truncate text-[11px] text-slate-500">
+                  {replyingTo.text || replyingTo.attachmentName || "Message"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReplyingTo(undefined)}
+                className="rounded-full p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                title="Annuler la réponse"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
           {attachment && (
             <div className="mb-2 flex items-center gap-2 rounded-2xl border border-emerald-100 bg-emerald-50 p-2">
               <img
@@ -607,6 +778,31 @@ export default function MessageBoard({
         </form>
 
       </div>
+
+      {imagePreview && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4"
+          onClick={() => setImagePreview(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <button
+            type="button"
+            onClick={() => setImagePreview(null)}
+            className="absolute right-4 top-4 rounded-full bg-white/10 p-2 text-white transition-colors hover:bg-white/20"
+            title="Fermer"
+            aria-label="Fermer l'image"
+          >
+            <X className="h-6 w-6" />
+          </button>
+          <img
+            src={imagePreview.dataUrl}
+            alt={imagePreview.name || "Image en plein écran"}
+            className="max-h-[90vh] max-w-[95vw] rounded-lg object-contain shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      )}
     </div>
   );
 }

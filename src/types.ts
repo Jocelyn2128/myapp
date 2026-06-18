@@ -22,10 +22,12 @@ export interface ChatMessage {
   senderColor: string;
   text: string;
   attachment?: MessageAttachment;
+  replyTo?: MessageReply;
   timestamp: number;
   editedAt?: number;
   deleted?: boolean;
   reactions?: Record<string, string[]>;
+  pinned?: boolean;
 }
 
 export interface PrivateMessage extends ChatMessage {
@@ -37,4 +39,11 @@ export interface MessageAttachment {
   type: "image";
   name: string;
   dataUrl: string;
+}
+
+export interface MessageReply {
+  messageId: string;
+  senderName: string;
+  text: string;
+  attachmentName?: string;
 }

@@ -4,6 +4,7 @@ import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer as createViteServer } from "vite";
 import crypto from "crypto";
+import fs from "fs";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -11,6 +12,8 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 const server = http.createServer(app);
+const DATA_DIR = path.join(process.cwd(), ".data");
+const USERS_DB_PATH = path.join(DATA_DIR, "users.json");
 
 // Use express.json for receiving authentication data
 app.use(express.json());
@@ -102,10 +105,17 @@ const publicChatHistory: Array<{
     name: string;
     dataUrl: string;
   };
+  replyTo?: {
+    messageId: string;
+    senderName: string;
+    text: string;
+    attachmentName?: string;
+  };
   timestamp: number;
   editedAt?: number;
   deleted?: boolean;
   reactions?: Record<string, string[]>;
+  pinned?: boolean;
 }> = [
   {
     id: "init-msg-1",
@@ -129,12 +139,19 @@ const privateChatHistory = new Map<string, Array<{
     name: string;
     dataUrl: string;
   };
+  replyTo?: {
+    messageId: string;
+    senderName: string;
+    text: string;
+    attachmentName?: string;
+  };
   roomId: string;
   recipientId: string;
   timestamp: number;
   editedAt?: number;
   deleted?: boolean;
   reactions?: Record<string, string[]>;
+  pinned?: boolean;
 }>>();
 
 // Collaborative grid state: coordinates (x,y) to hex codes
@@ -182,6 +199,35 @@ function publicUser(user: RegisteredUser) {
   };
 }
 
+function loadRegisteredUsers() {
+  try {
+    if (!fs.existsSync(USERS_DB_PATH)) return;
+    const raw = fs.readFileSync(USERS_DB_PATH, "utf8");
+    const users = JSON.parse(raw) as RegisteredUser[];
+
+    users.forEach(user => {
+      if (user.userId && user.username && user.passwordHash) {
+        registeredUsers.set(user.userId, user);
+      }
+    });
+  } catch (error) {
+    console.error("Impossible de charger les utilisateurs enregistrés:", error);
+  }
+}
+
+function saveRegisteredUsers() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(
+      USERS_DB_PATH,
+      JSON.stringify(Array.from(registeredUsers.values()), null, 2),
+      "utf8"
+    );
+  } catch (error) {
+    console.error("Impossible d'enregistrer les utilisateurs:", error);
+  }
+}
+
 function requireAdmin(req: express.Request, res: express.Response): any {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
@@ -210,7 +256,15 @@ const defaultAdmin: RegisteredUser = {
   approved: true,
   createdAt: Date.now()
 };
-registeredUsers.set(defaultAdmin.userId, defaultAdmin);
+loadRegisteredUsers();
+registeredUsers.set(defaultAdmin.userId, {
+  ...defaultAdmin,
+  ...(registeredUsers.get(defaultAdmin.userId) || {}),
+  passwordHash: hashPassword(ADMIN_PASSWORD),
+  role: "admin",
+  approved: true
+});
+saveRegisteredUsers();
 
 // Helper to get sorted chat identifier key
 function getPrivateChatKey(id1: string, id2: string): string {
@@ -233,6 +287,17 @@ function toggleReactionOnMessage(message: { reactions?: Record<string, string[]>
   } else {
     message.reactions[emoji] = [...currentUsers, userId];
   }
+}
+
+function buildReplySnapshot(replyTo: any) {
+  if (!replyTo || typeof replyTo.messageId !== "string") return undefined;
+
+  return {
+    messageId: replyTo.messageId,
+    senderName: typeof replyTo.senderName === "string" ? replyTo.senderName.slice(0, 80) : "Utilisateur",
+    text: typeof replyTo.text === "string" ? replyTo.text.slice(0, 160) : "",
+    ...(typeof replyTo.attachmentName === "string" ? { attachmentName: replyTo.attachmentName.slice(0, 120) } : {})
+  };
 }
 
 // 🔐 REST authentication and account approval endpoints
@@ -268,6 +333,7 @@ app.post("/api/register", (req, res) => {
   };
 
   registeredUsers.set(userId, user);
+  saveRegisteredUsers();
 
   return res.status(201).json({
     status: "pending",
@@ -345,6 +411,7 @@ app.post("/api/admin/users/:userId/approve", (req, res) => {
 
   user.approved = true;
   user.role = req.body.role === "admin" ? "admin" : "user";
+  saveRegisteredUsers();
 
   return res.json({ user: publicUser(user) });
 });
@@ -363,6 +430,7 @@ app.post("/api/admin/users/:userId/reject", (req, res) => {
   }
 
   registeredUsers.delete(req.params.userId);
+  saveRegisteredUsers();
   return res.json({ ok: true });
 });
 
@@ -465,6 +533,7 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
         
         case "SEND_PUBLIC_MESSAGE": {
           const attachment = payload.attachment?.type === "image" ? payload.attachment : undefined;
+          const replyTo = buildReplySnapshot(payload.replyTo);
           const newMsg = {
             id: "msg-pub-" + Date.now() + "-" + Math.floor(Math.random() * 1000),
             senderId: userId,
@@ -472,6 +541,7 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
             senderColor: color,
             text: payload.text || "",
             ...(attachment ? { attachment } : {}),
+            ...(replyTo ? { replyTo } : {}),
             timestamp: Date.now()
           };
           publicChatHistory.push(newMsg);
@@ -528,12 +598,27 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
           broadcastToAll("PUBLIC_MESSAGE_UPDATED", targetMsg);
           break;
         }
+
+        case "PIN_PUBLIC_MESSAGE": {
+          const messageId = payload.messageId;
+          const targetMsg = publicChatHistory.find(msg => msg.id === messageId);
+
+          if (!targetMsg || targetMsg.deleted) {
+            ws.send(buildWSEvent("ERROR", { message: "Épinglage impossible pour ce message." }));
+            break;
+          }
+
+          targetMsg.pinned = !targetMsg.pinned;
+          broadcastToAll("PUBLIC_MESSAGE_UPDATED", targetMsg);
+          break;
+        }
         
         case "SEND_PRIVATE_MESSAGE": {
           const recipientId = payload.recipientId;
           const target = connectedClients.get(recipientId);
           const chatKey = getPrivateChatKey(userId, recipientId);
           const attachment = payload.attachment?.type === "image" ? payload.attachment : undefined;
+          const replyTo = buildReplySnapshot(payload.replyTo);
           
           const dmMsg = {
             id: "msg-priv-" + Date.now() + "-" + Math.floor(Math.random() * 1000),
@@ -542,6 +627,7 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
             senderColor: color,
             text: payload.text || "",
             ...(attachment ? { attachment } : {}),
+            ...(replyTo ? { replyTo } : {}),
             roomId: "private",
             recipientId: recipientId,
             timestamp: Date.now()
@@ -625,6 +711,28 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
           }
 
           toggleReactionOnMessage(targetMsg, emoji, userId);
+
+          const target = connectedClients.get(recipientId);
+          if (target && target.ws.readyState === WebSocket.OPEN) {
+            target.ws.send(buildWSEvent("PRIVATE_MESSAGE_UPDATED", targetMsg));
+          }
+          ws.send(buildWSEvent("PRIVATE_MESSAGE_UPDATED", targetMsg));
+          break;
+        }
+
+        case "PIN_PRIVATE_MESSAGE": {
+          const messageId = payload.messageId;
+          const recipientId = payload.recipientId;
+          const chatKey = getPrivateChatKey(userId, recipientId);
+          const history = privateChatHistory.get(chatKey) || [];
+          const targetMsg = history.find(msg => msg.id === messageId);
+
+          if (!targetMsg || targetMsg.deleted) {
+            ws.send(buildWSEvent("ERROR", { message: "Épinglage impossible pour ce message privé." }));
+            break;
+          }
+
+          targetMsg.pinned = !targetMsg.pinned;
 
           const target = connectedClients.get(recipientId);
           if (target && target.ws.readyState === WebSocket.OPEN) {

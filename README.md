@@ -278,5 +278,6 @@ npm run start
 
 - Changez `JWT_SECRET` en production.
 - Ne publiez jamais vos fichiers `.env.local`.
+- Les comptes utilisateurs sont stockes localement dans `.data/users.json`.
 - Les donnees de chat et de grille sont stockees en memoire : elles sont perdues au redemarrage du serveur.
 - Les messages prives sont limites au fonctionnement applicatif local ; ils ne sont pas chiffres de bout en bout.

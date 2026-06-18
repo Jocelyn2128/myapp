@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, FormEvent } from "react";
-import { UserProfile, ChatMessage, PrivateMessage, MessageAttachment, PendingUser } from "./types";
+import { UserProfile, ChatMessage, PrivateMessage, MessageAttachment, PendingUser, MessageReply } from "./types";
 import PixelBoard from "./components/PixelBoard";
 import MessageBoard from "./components/MessageBoard";
 import { 
@@ -511,11 +511,11 @@ export default function App() {
   }, []);
 
   // Chat callbacks
-  const handleChatSendMessage = (text: string, recipientId?: string, attachment?: MessageAttachment) => {
+  const handleChatSendMessage = (text: string, recipientId?: string, attachment?: MessageAttachment, replyTo?: MessageReply) => {
     if (recipientId) {
-      sendWSMessage("SEND_PRIVATE_MESSAGE", { text, recipientId, attachment });
+      sendWSMessage("SEND_PRIVATE_MESSAGE", { text, recipientId, attachment, replyTo });
     } else {
-      sendWSMessage("SEND_PUBLIC_MESSAGE", { text, attachment });
+      sendWSMessage("SEND_PUBLIC_MESSAGE", { text, attachment, replyTo });
     }
   };
 
@@ -540,6 +540,14 @@ export default function App() {
       sendWSMessage("REACT_PRIVATE_MESSAGE", { messageId, emoji, recipientId });
     } else {
       sendWSMessage("REACT_PUBLIC_MESSAGE", { messageId, emoji });
+    }
+  };
+
+  const handlePinMessage = (messageId: string, recipientId?: string) => {
+    if (recipientId) {
+      sendWSMessage("PIN_PRIVATE_MESSAGE", { messageId, recipientId });
+    } else {
+      sendWSMessage("PIN_PUBLIC_MESSAGE", { messageId });
     }
   };
 
@@ -987,6 +995,7 @@ export default function App() {
               onEditMessage={handleEditMessage}
               onDeleteMessage={handleDeleteMessage}
               onReactMessage={handleReactMessage}
+              onPinMessage={handlePinMessage}
               onStartDM={handleStartDM}
             />
           </div>
