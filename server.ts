@@ -17,6 +17,7 @@ app.use(express.json());
 
 // JWT Utility logic for cryptographic session signing
 const JWT_SECRET = process.env.JWT_SECRET || "super-collab-secret-pixel-key-2026";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 
 function base64UrlEncode(str: string): string {
   return Buffer.from(str)
@@ -76,7 +77,20 @@ function verifyToken(token: string): any {
 }
 
 // Memory Database & Shared Stateful models
+type UserRole = "user" | "admin";
+
+interface RegisteredUser {
+  userId: string;
+  username: string;
+  passwordHash: string;
+  role: UserRole;
+  color: string;
+  approved: boolean;
+  createdAt: number;
+}
+
 const connectedClients = new Map<string, { userId: string; username: string; role: string; color: string; ws: WebSocket }>();
+const registeredUsers = new Map<string, RegisteredUser>();
 const publicChatHistory: Array<{
   id: string;
   senderId: string;
@@ -91,6 +105,7 @@ const publicChatHistory: Array<{
   timestamp: number;
   editedAt?: number;
   deleted?: boolean;
+  reactions?: Record<string, string[]>;
 }> = [
   {
     id: "init-msg-1",
@@ -119,6 +134,7 @@ const privateChatHistory = new Map<string, Array<{
   timestamp: number;
   editedAt?: number;
   deleted?: boolean;
+  reactions?: Record<string, string[]>;
 }>>();
 
 // Collaborative grid state: coordinates (x,y) to hex codes
@@ -147,34 +163,207 @@ const REVEL_COLORS = [
   "#d946ef", "#ec4899"
 ];
 
+function normalizeUsername(username: string): string {
+  return username.trim().toLowerCase();
+}
+
+function hashPassword(password: string): string {
+  return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+function publicUser(user: RegisteredUser) {
+  return {
+    userId: user.userId,
+    username: user.username,
+    role: user.role,
+    color: user.color,
+    approved: user.approved,
+    createdAt: user.createdAt
+  };
+}
+
+function requireAdmin(req: express.Request, res: express.Response): any {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  const decoded = token ? verifyToken(token) : null;
+
+  if (!decoded || decoded.exp && Date.now() > decoded.exp) {
+    res.status(401).json({ error: "Authentification administrateur requise." });
+    return null;
+  }
+
+  const user = registeredUsers.get(decoded.userId);
+  if (!user || user.role !== "admin" || !user.approved) {
+    res.status(403).json({ error: "Accès réservé aux administrateurs." });
+    return null;
+  }
+
+  return user;
+}
+
+const defaultAdmin: RegisteredUser = {
+  userId: "usr_admin",
+  username: "admin",
+  passwordHash: hashPassword(ADMIN_PASSWORD),
+  role: "admin",
+  color: "#ef4444",
+  approved: true,
+  createdAt: Date.now()
+};
+registeredUsers.set(defaultAdmin.userId, defaultAdmin);
+
 // Helper to get sorted chat identifier key
 function getPrivateChatKey(id1: string, id2: string): string {
   return [id1, id2].sort().join("<->");
 }
 
-// 🔐 REST Endpoint for Token Generation
-app.post("/api/token", (req, res) => {
-  const { username, role, expireInSecs } = req.body;
-  if (!username || typeof username !== "string") {
-    return res.status(400).json({ error: "username is required as a string" });
+function toggleReactionOnMessage(message: { reactions?: Record<string, string[]> }, emoji: string, userId: string) {
+  if (!message.reactions) {
+    message.reactions = {};
   }
-  
+
+  const currentUsers = message.reactions[emoji] || [];
+  if (currentUsers.includes(userId)) {
+    const nextUsers = currentUsers.filter(id => id !== userId);
+    if (nextUsers.length) {
+      message.reactions[emoji] = nextUsers;
+    } else {
+      delete message.reactions[emoji];
+    }
+  } else {
+    message.reactions[emoji] = [...currentUsers, userId];
+  }
+}
+
+// 🔐 REST authentication and account approval endpoints
+app.post("/api/register", (req, res) => {
+  const { username, password } = req.body;
+  if (!username || typeof username !== "string" || username.trim().length < 3) {
+    return res.status(400).json({ error: "Le pseudonyme doit contenir au moins 3 caractères." });
+  }
+
+  if (!password || typeof password !== "string" || password.length < 4) {
+    return res.status(400).json({ error: "Le mot de passe doit contenir au moins 4 caractères." });
+  }
+
+  const normalizedUsername = normalizeUsername(username);
+  const userAlreadyExists = Array.from(registeredUsers.values()).some(
+    user => normalizeUsername(user.username) === normalizedUsername
+  );
+
+  if (userAlreadyExists) {
+    return res.status(409).json({ error: "Ce pseudonyme est déjà utilisé." });
+  }
+
   const userId = "usr_" + Math.floor(100000 + Math.random() * 900000);
   const color = REVEL_COLORS[Math.floor(Math.random() * REVEL_COLORS.length)];
+  const user: RegisteredUser = {
+    userId,
+    username: username.trim(),
+    passwordHash: hashPassword(password),
+    role: "user",
+    color,
+    approved: false,
+    createdAt: Date.now()
+  };
+
+  registeredUsers.set(userId, user);
+
+  return res.status(201).json({
+    status: "pending",
+    user: publicUser(user),
+    message: "Compte créé. Un administrateur doit le valider avant connexion."
+  });
+});
+
+app.post("/api/login", (req, res) => {
+  const { username, password, expireInSecs } = req.body;
+  if (!username || typeof username !== "string" || !password || typeof password !== "string") {
+    return res.status(400).json({ error: "Pseudonyme et mot de passe requis." });
+  }
+
+  const normalizedUsername = normalizeUsername(username);
+  const user = Array.from(registeredUsers.values()).find(
+    item => normalizeUsername(item.username) === normalizedUsername
+  );
+
+  if (!user || user.passwordHash !== hashPassword(password)) {
+    return res.status(401).json({ error: "Identifiants invalides." });
+  }
+
+  if (!user.approved) {
+    return res.status(403).json({
+      error: "Compte en attente de validation par un administrateur.",
+      status: "pending"
+    });
+  }
+
   const durationMs = expireInSecs ? expireInSecs * 1000 : 3600000; // 1 hour default
-  
-  const token = signToken({ userId, username, role: role || "user", color }, durationMs);
+  const token = signToken({
+    userId: user.userId,
+    username: user.username,
+    role: user.role,
+    color: user.color
+  }, durationMs);
   
   return res.json({
     token,
     user: {
-      userId,
-      username,
-      role: role || "user",
-      color,
+      userId: user.userId,
+      username: user.username,
+      role: user.role,
+      color: user.color,
+      approved: user.approved,
       exp: Date.now() + durationMs
     }
   });
+});
+
+app.post("/api/token", (req, res) => {
+  return res.status(410).json({ error: "Endpoint désactivé. Utilisez /api/login après validation du compte." });
+});
+
+app.get("/api/admin/pending-users", (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+
+  const pendingUsers = Array.from(registeredUsers.values())
+    .filter(user => !user.approved)
+    .map(publicUser);
+
+  return res.json({ users: pendingUsers });
+});
+
+app.post("/api/admin/users/:userId/approve", (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+
+  const user = registeredUsers.get(req.params.userId);
+  if (!user) {
+    return res.status(404).json({ error: "Utilisateur introuvable." });
+  }
+
+  user.approved = true;
+  user.role = req.body.role === "admin" ? "admin" : "user";
+
+  return res.json({ user: publicUser(user) });
+});
+
+app.post("/api/admin/users/:userId/reject", (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+
+  const user = registeredUsers.get(req.params.userId);
+  if (!user) {
+    return res.status(404).json({ error: "Utilisateur introuvable." });
+  }
+
+  if (user.role === "admin") {
+    return res.status(400).json({ error: "Impossible de refuser un administrateur." });
+  }
+
+  registeredUsers.delete(req.params.userId);
+  return res.json({ ok: true });
 });
 
 // Broadcast packet inspect event with logging helpers
@@ -216,9 +405,22 @@ server.on("upgrade", (request, socket, head) => {
     socket.destroy();
     return;
   }
+
+  const registeredUser = registeredUsers.get(decoded.userId);
+  if (!registeredUser || !registeredUser.approved) {
+    socket.write("HTTP/1.1 403 Forbidden\r\n\r\nCompte non validé");
+    socket.destroy();
+    return;
+  }
   
   wss.handleUpgrade(request, socket, head, (ws) => {
-    wss.emit("connection", ws, decoded);
+    wss.emit("connection", ws, {
+      userId: registeredUser.userId,
+      username: registeredUser.username,
+      role: registeredUser.role,
+      color: registeredUser.color,
+      exp: decoded.exp
+    });
   });
 });
 
@@ -311,6 +513,21 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
           broadcastToAll("PUBLIC_MESSAGE_UPDATED", targetMsg);
           break;
         }
+
+        case "REACT_PUBLIC_MESSAGE": {
+          const messageId = payload.messageId;
+          const emoji = typeof payload.emoji === "string" ? payload.emoji : "";
+          const targetMsg = publicChatHistory.find(msg => msg.id === messageId);
+
+          if (!targetMsg || targetMsg.deleted || !emoji) {
+            ws.send(buildWSEvent("ERROR", { message: "Réaction impossible pour ce message." }));
+            break;
+          }
+
+          toggleReactionOnMessage(targetMsg, emoji, userId);
+          broadcastToAll("PUBLIC_MESSAGE_UPDATED", targetMsg);
+          break;
+        }
         
         case "SEND_PRIVATE_MESSAGE": {
           const recipientId = payload.recipientId;
@@ -385,6 +602,29 @@ wss.on("connection", (ws: WebSocket, userSession: any) => {
           delete targetMsg.attachment;
           targetMsg.deleted = true;
           targetMsg.editedAt = Date.now();
+
+          const target = connectedClients.get(recipientId);
+          if (target && target.ws.readyState === WebSocket.OPEN) {
+            target.ws.send(buildWSEvent("PRIVATE_MESSAGE_UPDATED", targetMsg));
+          }
+          ws.send(buildWSEvent("PRIVATE_MESSAGE_UPDATED", targetMsg));
+          break;
+        }
+
+        case "REACT_PRIVATE_MESSAGE": {
+          const messageId = payload.messageId;
+          const recipientId = payload.recipientId;
+          const emoji = typeof payload.emoji === "string" ? payload.emoji : "";
+          const chatKey = getPrivateChatKey(userId, recipientId);
+          const history = privateChatHistory.get(chatKey) || [];
+          const targetMsg = history.find(msg => msg.id === messageId);
+
+          if (!targetMsg || targetMsg.deleted || !emoji) {
+            ws.send(buildWSEvent("ERROR", { message: "Réaction impossible pour ce message privé." }));
+            break;
+          }
+
+          toggleReactionOnMessage(targetMsg, emoji, userId);
 
           const target = connectedClients.get(recipientId);
           if (target && target.ws.readyState === WebSocket.OPEN) {

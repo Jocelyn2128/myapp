@@ -5,7 +5,9 @@ Application web collaborative en temps reel avec authentification JWT, messageri
 ## Fonctionnalites
 
 - Authentification locale par generation de jeton JWT.
-- Choix du role utilisateur : `user` ou `admin`.
+- Inscription utilisateur avec validation obligatoire par un administrateur.
+- Connexion refusee tant que le compte n'est pas approuve.
+- Panneau administrateur pour valider ou refuser les comptes en attente.
 - Expiration configurable du jeton pour tester la deconnexion.
 - Connexion temps reel via WebSocket.
 - Salon de discussion public.
@@ -54,6 +56,7 @@ Exemple de configuration locale :
 GEMINI_API_KEY="MY_GEMINI_API_KEY"
 APP_URL="http://localhost:3000"
 JWT_SECRET="change-me-in-production"
+ADMIN_PASSWORD="admin123"
 ```
 
 Note : `GEMINI_API_KEY` est present dans le template AI Studio, mais cette version du projet utilise surtout le serveur Express/WebSocket local.
@@ -76,12 +79,12 @@ Le serveur Express expose l'API et les WebSockets, puis Vite sert l'application 
 
 ## Utilisation
 
-1. Saisissez un pseudonyme.
-2. Choisissez un role :
-   - `Utilisateur` pour discuter et dessiner.
-   - `Admin` pour pouvoir vider la grille.
-3. Choisissez une duree de validite du jeton.
-4. Cliquez sur `Signer mon JWT & Connecter`.
+1. Creez un compte depuis l'onglet `Inscription`.
+2. Connectez-vous avec le compte administrateur par defaut :
+   - pseudonyme : `admin`
+   - mot de passe : valeur de `ADMIN_PASSWORD`, ou `admin123` par defaut
+3. Dans le panneau `Validation des inscriptions`, approuvez le nouveau compte.
+4. Connectez-vous avec le compte approuve.
 5. Ouvrez un deuxieme onglet pour tester la collaboration temps reel, les messages prives et les mises a jour du tableau.
 
 ## Scripts disponibles
@@ -137,19 +140,44 @@ Supprime les fichiers generes `dist` et `server.js`.
 
 ## API et WebSocket
 
-### `POST /api/token`
+### `POST /api/register`
 
-Genere un jeton JWT et un profil utilisateur.
+Cree un compte utilisateur en attente de validation.
 
 Exemple de body :
 
 ```json
 {
   "username": "Alice",
-  "role": "admin",
+  "password": "secret"
+}
+```
+
+### `POST /api/login`
+
+Connecte un compte deja approuve et genere un jeton JWT.
+
+Exemple de body :
+
+```json
+{
+  "username": "Alice",
+  "password": "secret",
   "expireInSecs": 3600
 }
 ```
+
+### `GET /api/admin/pending-users`
+
+Liste les comptes en attente. Requiert un token administrateur.
+
+### `POST /api/admin/users/:userId/approve`
+
+Valide un compte en attente. Requiert un token administrateur.
+
+### `POST /api/admin/users/:userId/reject`
+
+Refuse et supprime un compte en attente. Requiert un token administrateur.
 
 ### WebSocket
 
@@ -168,8 +196,14 @@ Evenements principaux :
 - `USER_LEFT`
 - `SEND_PUBLIC_MESSAGE`
 - `PUBLIC_MESSAGE`
+- `EDIT_PUBLIC_MESSAGE`
+- `DELETE_PUBLIC_MESSAGE`
+- `PUBLIC_MESSAGE_UPDATED`
 - `SEND_PRIVATE_MESSAGE`
 - `PRIVATE_MESSAGE`
+- `EDIT_PRIVATE_MESSAGE`
+- `DELETE_PRIVATE_MESSAGE`
+- `PRIVATE_MESSAGE_UPDATED`
 - `REQUEST_PRIVATE_HISTORY`
 - `PRIVATE_HISTORY`
 - `SEND_PIXEL_UPDATE`

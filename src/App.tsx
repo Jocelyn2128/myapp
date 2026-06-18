@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, FormEvent } from "react";
-import { UserProfile, ChatMessage, PrivateMessage, MessageAttachment } from "./types";
+import { UserProfile, ChatMessage, PrivateMessage, MessageAttachment, PendingUser } from "./types";
 import PixelBoard from "./components/PixelBoard";
 import MessageBoard from "./components/MessageBoard";
 import { 
@@ -15,8 +15,24 @@ import {
   KeyRound,
   ShieldCheck,
   CheckCircle2,
-  Clock
+  Clock,
+  Eye,
+  EyeOff,
+  UserPlus,
+  XCircle
 } from "lucide-react";
+
+async function readApiJson(res: Response, fallbackMessage: string) {
+  const contentType = res.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return res.json();
+  }
+
+  await res.text();
+  throw new Error(
+    `${fallbackMessage} Le serveur a retourné une page HTML au lieu d'un JSON. Redémarrez le serveur avec Ctrl+C puis npm run dev.`
+  );
+}
 
 export default function App() {
   // Session / Authentication Configuration
@@ -27,11 +43,16 @@ export default function App() {
   });
 
   // Login variables
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [nickNameInput, setNickNameInput] = useState("");
-  const [selectedRole, setSelectedRole] = useState("user");
+  const [passwordInput, setPasswordInput] = useState("");
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [selectedExpiry, setSelectedExpiry] = useState(3600); // 1hr default
   const [isSignLoading, setIsSignLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
 
   // Active sync states
   const [connectionStatus, setConnectionStatus] = useState<"IDLE" | "CONNECTING" | "CONNECTED" | "DISCONNECTED" | "EXPIRED">("IDLE");
@@ -39,6 +60,9 @@ export default function App() {
   const [publicMessages, setPublicMessages] = useState<ChatMessage[]>([]);
   const [privateDMs, setPrivateDMs] = useState<Record<string, PrivateMessage[]>>({});
   const [pixelGrid, setPixelGrid] = useState<Record<string, string>>({});
+  const [pendingUsers, setPendingUsers] = useState<PendingUser[]>([]);
+  const [adminActionError, setAdminActionError] = useState<string | null>(null);
+  const [isLoadingPendingUsers, setIsLoadingPendingUsers] = useState(false);
   
   // Channels
   const [activeChannel, setActiveChannel] = useState<"public" | string>("public");
@@ -67,27 +91,29 @@ export default function App() {
       return;
     }
 
+    if (!passwordInput) {
+      setAuthError("Veuillez saisir votre mot de passe.");
+      return;
+    }
+
     setIsSignLoading(true);
     setAuthError(null);
+    setAuthNotice(null);
 
     try {
-      const res = await fetch("/api/token", {
+      const res = await fetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           username: nickNameInput.trim(),
-          role: selectedRole,
+          password: passwordInput,
           expireInSecs: selectedExpiry
         })
       });
+      const data = await readApiJson(res, "Connexion impossible.");
 
       if (!res.ok) {
-        throw new Error("Erreur de communication avec le contrôleur d'accès.");
-      }
-
-      const data = await res.json();
-      if (data.error) {
-        throw new Error(data.error);
+        throw new Error(data.error || "Erreur de communication avec le contrôleur d'accès.");
       }
 
       // Cache session setup for reload safety
@@ -99,6 +125,53 @@ export default function App() {
       setConnectionStatus("CONNECTING");
     } catch (err: any) {
       setAuthError(err.message || "Impossible de se connecter au serveur backend.");
+    } finally {
+      setIsSignLoading(false);
+    }
+  };
+
+  const handleRegister = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!nickNameInput.trim()) {
+      setAuthError("Veuillez saisir un pseudonyme valide.");
+      return;
+    }
+
+    if (passwordInput.length < 4) {
+      setAuthError("Le mot de passe doit contenir au moins 4 caractères.");
+      return;
+    }
+
+    if (passwordInput !== confirmPasswordInput) {
+      setAuthError("Les mots de passe ne correspondent pas.");
+      return;
+    }
+
+    setIsSignLoading(true);
+    setAuthError(null);
+    setAuthNotice(null);
+
+    try {
+      const res = await fetch("/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: nickNameInput.trim(),
+          password: passwordInput
+        })
+      });
+      const data = await readApiJson(res, "Inscription impossible.");
+
+      if (!res.ok) {
+        throw new Error(data.error || "Impossible de créer le compte.");
+      }
+
+      setAuthMode("login");
+      setPasswordInput("");
+      setConfirmPasswordInput("");
+      setAuthNotice(data.message || "Compte créé. Attendez la validation d'un administrateur.");
+    } catch (err: any) {
+      setAuthError(err.message || "Impossible de créer le compte.");
     } finally {
       setIsSignLoading(false);
     }
@@ -119,6 +192,78 @@ export default function App() {
     setPrivateDMs({});
     setPixelGrid({});
     setActiveChannel("public");
+    setPendingUsers([]);
+    setAdminActionError(null);
+  };
+
+  const fetchPendingUsers = useCallback(async () => {
+    if (!token || currentUserRef.current?.role !== "admin") return;
+
+    setIsLoadingPendingUsers(true);
+    setAdminActionError(null);
+
+    try {
+      const res = await fetch("/api/admin/pending-users", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await readApiJson(res, "Chargement des inscriptions impossible.");
+
+      if (!res.ok) {
+        throw new Error(data.error || "Impossible de charger les inscriptions.");
+      }
+
+      setPendingUsers(data.users || []);
+    } catch (err: any) {
+      setAdminActionError(err.message || "Impossible de charger les inscriptions.");
+    } finally {
+      setIsLoadingPendingUsers(false);
+    }
+  }, [token]);
+
+  const handleApproveUser = async (userId: string, role: "user" | "admin" = "user") => {
+    if (!token) return;
+    setAdminActionError(null);
+
+    try {
+      const res = await fetch(`/api/admin/users/${userId}/approve`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ role })
+      });
+      const data = await readApiJson(res, "Validation impossible.");
+
+      if (!res.ok) {
+        throw new Error(data.error || "Validation impossible.");
+      }
+
+      await fetchPendingUsers();
+    } catch (err: any) {
+      setAdminActionError(err.message || "Validation impossible.");
+    }
+  };
+
+  const handleRejectUser = async (userId: string) => {
+    if (!token) return;
+    setAdminActionError(null);
+
+    try {
+      const res = await fetch(`/api/admin/users/${userId}/reject`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await readApiJson(res, "Refus impossible.");
+
+      if (!res.ok) {
+        throw new Error(data.error || "Refus impossible.");
+      }
+
+      await fetchPendingUsers();
+    } catch (err: any) {
+      setAdminActionError(err.message || "Refus impossible.");
+    }
   };
 
   // Establish custom ws socket connection with authenticated payload URL
@@ -352,6 +497,12 @@ export default function App() {
     };
   }, [token, connectWebSocket]);
 
+  useEffect(() => {
+    if (token && currentUser?.role === "admin") {
+      fetchPendingUsers();
+    }
+  }, [token, currentUser?.role, fetchPendingUsers]);
+
   // Trigger outbound WS message send
   const sendWSMessage = useCallback((type: string, payload: any) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -381,6 +532,14 @@ export default function App() {
       sendWSMessage("DELETE_PRIVATE_MESSAGE", { messageId, recipientId });
     } else {
       sendWSMessage("DELETE_PUBLIC_MESSAGE", { messageId });
+    }
+  };
+
+  const handleReactMessage = (messageId: string, emoji: string, recipientId?: string) => {
+    if (recipientId) {
+      sendWSMessage("REACT_PRIVATE_MESSAGE", { messageId, emoji, recipientId });
+    } else {
+      sendWSMessage("REACT_PUBLIC_MESSAGE", { messageId, emoji });
     }
   };
 
@@ -439,7 +598,7 @@ export default function App() {
             </p>
           </div>
 
-          <form onSubmit={handleAuthenticate} className="space-y-4">
+          <form onSubmit={authMode === "login" ? handleAuthenticate : handleRegister} className="space-y-4">
             {/* Nickname */}
             <div>
               <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
@@ -458,41 +617,62 @@ export default function App() {
               </div>
             </div>
 
-            {/* Administrable Role */}
             <div>
               <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
-                Rôle Administrable
+                Mot de passe
               </label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="relative flex items-center">
+                <KeyRound className="absolute left-3 w-4 h-4 text-slate-500" />
+                <input
+                  type={showPassword ? "text" : "password"}
+                  required
+                  placeholder="Votre mot de passe"
+                  value={passwordInput}
+                  onChange={(e) => setPasswordInput(e.target.value)}
+                  className="w-full pl-9 pr-10 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 transition-colors"
+                />
                 <button
                   type="button"
-                  onClick={() => setSelectedRole("user")}
-                  className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border text-xs font-medium cursor-pointer transition-all ${
-                    selectedRole === "user"
-                      ? "bg-indigo-505 bg-indigo-500/10 text-indigo-400 border-indigo-500/30"
-                      : "bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700"
-                  }`}
+                  onClick={() => setShowPassword(prev => !prev)}
+                  className="absolute right-3 text-slate-500 hover:text-slate-300 transition-colors"
+                  title={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                  aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
                 >
-                  <User className="w-3.5 h-3.5" />
-                  <span>Utilisateur (User)</span>
-                </button>
-                
-                <button
-                  type="button"
-                  onClick={() => setSelectedRole("admin")}
-                  className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border text-xs font-medium cursor-pointer transition-all ${
-                    selectedRole === "admin"
-                      ? "bg-rose-500/10 text-rose-400 border-rose-500/30"
-                      : "bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700"
-                  }`}
-                >
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Admin [Grille vide]</span>
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
             </div>
 
+            {authMode === "register" && (
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+                  Confirmer le mot de passe
+                </label>
+                <div className="relative flex items-center">
+                  <ShieldCheck className="absolute left-3 w-4 h-4 text-slate-500" />
+                  <input
+                    type={showConfirmPassword ? "text" : "password"}
+                    required
+                    placeholder="Répétez le mot de passe"
+                    value={confirmPasswordInput}
+                    onChange={(e) => setConfirmPasswordInput(e.target.value)}
+                    className="w-full pl-9 pr-10 py-2 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500/50 transition-colors"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword(prev => !prev)}
+                    className="absolute right-3 text-slate-500 hover:text-slate-300 transition-colors"
+                    title={showConfirmPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                    aria-label={showConfirmPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                  >
+                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Expiry testing dropdown (Satisfies expiracy handling) */}
+            {authMode === "login" && (
             <div>
               <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center justify-between">
                 <span>Durée de validité du Jeton</span>
@@ -514,6 +694,7 @@ export default function App() {
                 * Choisissez <b>15 secondes</b> pour observer le cycle automatique de fermeture, de déconnexion et de blocage pour de sécurité suite à l'expiration de la signature cryptographique.
               </span>
             </div>
+            )}
 
             {authError && (
               <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl flex items-start gap-2">
@@ -522,14 +703,65 @@ export default function App() {
               </div>
             )}
 
+            {authNotice && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-xs rounded-xl flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{authNotice}</span>
+              </div>
+            )}
+
             <button
               type="submit"
               disabled={isSignLoading}
-              className="w-full py-2.5 bg-gradient-to-r from-emerald-500 to-teal-600 border border-transparent hover:from-emerald-400 hover:to-teal-500 text-white font-semibold text-xs rounded-xl shadow-lg shadow-emerald-950/20 flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50"
+              className={`w-full py-2.5 border border-transparent text-white font-semibold text-xs rounded-xl shadow-lg flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50 ${
+                authMode === "login"
+                  ? "bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 shadow-emerald-950/20"
+                  : "bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-400 hover:to-violet-500 shadow-indigo-950/20"
+              }`}
             >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>{isSignLoading ? "Génération cryptographique..." : "Signer mon JWT & Connecter"}</span>
+              {authMode === "login" ? <Sparkles className="w-3.5 h-3.5" /> : <UserPlus className="w-3.5 h-3.5" />}
+              <span>
+                {isSignLoading
+                  ? "Traitement..."
+                  : authMode === "login"
+                    ? "Se connecter"
+                    : "Créer un compte en attente"}
+              </span>
             </button>
+
+            <div className="text-center text-xs text-slate-500">
+              {authMode === "login" ? (
+                <>
+                  <span>Pas encore de compte ? </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode("register");
+                      setAuthError(null);
+                      setAuthNotice(null);
+                    }}
+                    className="font-semibold text-indigo-400 hover:text-indigo-300"
+                  >
+                    Créer une inscription
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span>Déjà un compte validé ? </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMode("login");
+                      setAuthError(null);
+                      setAuthNotice(null);
+                    }}
+                    className="font-semibold text-emerald-400 hover:text-emerald-300"
+                  >
+                    Se connecter
+                  </button>
+                </>
+              )}
+            </div>
           </form>
 
           {/* Footer badge */}
@@ -643,6 +875,92 @@ export default function App() {
           </div>
         )}
 
+        {currentUser.role === "admin" && (
+          <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                  Validation des inscriptions
+                </h2>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Les nouveaux comptes doivent être approuvés avant de pouvoir se connecter.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={fetchPendingUsers}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingPendingUsers ? "animate-spin" : ""}`} />
+                Actualiser
+              </button>
+            </div>
+
+            {adminActionError && (
+              <div className="mt-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-[11px] font-medium text-red-700">
+                {adminActionError}
+              </div>
+            )}
+
+            <div className="mt-4">
+              {pendingUsers.length === 0 ? (
+                <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-3 text-[11px] text-slate-500">
+                  Aucun compte en attente.
+                </div>
+              ) : (
+                <div className="grid gap-2">
+                  {pendingUsers.map(user => (
+                    <div
+                      key={user.userId}
+                      className="flex flex-col gap-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div
+                          className="h-3 w-3 rounded-full shrink-0"
+                          style={{ backgroundColor: user.color }}
+                        />
+                        <div className="min-w-0">
+                          <p className="truncate text-xs font-bold text-slate-800">{user.username}</p>
+                          <p className="text-[10px] text-slate-500">
+                            ID {user.userId} · Inscrit le {new Date(user.createdAt).toLocaleDateString("fr-FR")}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleApproveUser(user.userId, "user")}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-700"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Valider user
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleApproveUser(user.userId, "admin")}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-slate-800"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          Valider admin
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRejectUser(user.userId)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-red-600 hover:bg-red-50"
+                        >
+                          <XCircle className="w-3.5 h-3.5" />
+                          Refuser
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           
           {/* Left Block: Collaborative grid canvas (taking 5 cols) */}
@@ -668,6 +986,7 @@ export default function App() {
               onSendMessage={handleChatSendMessage}
               onEditMessage={handleEditMessage}
               onDeleteMessage={handleDeleteMessage}
+              onReactMessage={handleReactMessage}
               onStartDM={handleStartDM}
             />
           </div>

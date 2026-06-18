@@ -26,6 +26,7 @@ interface MessageBoardProps {
   onSendMessage: (text: string, recipientId?: string, attachment?: MessageAttachment) => void;
   onEditMessage: (messageId: string, text: string, recipientId?: string) => void;
   onDeleteMessage: (messageId: string, recipientId?: string) => void;
+  onReactMessage: (messageId: string, emoji: string, recipientId?: string) => void;
   onStartDM: (otherUserId: string) => void;
 }
 
@@ -34,6 +35,8 @@ const EMOJI_OPTIONS = [
   "🙏", "👏", "🔥", "❤️", "💔", "✨", "🎉", "✅",
   "👋", "🤝", "💪", "🚀", "📸", "🎨", "💬", "🔒"
 ];
+
+const MESSAGE_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 export default function MessageBoard({
   currentUser,
@@ -45,6 +48,7 @@ export default function MessageBoard({
   onSendMessage,
   onEditMessage,
   onDeleteMessage,
+  onReactMessage,
   onStartDM
 }: MessageBoardProps) {
   const [inputText, setInputText] = useState("");
@@ -53,6 +57,7 @@ export default function MessageBoard({
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
+  const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const messageInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
@@ -145,6 +150,11 @@ export default function MessageBoard({
     if (editingMessageId === messageId) {
       cancelEditingMessage();
     }
+  };
+
+  const reactToMessage = (messageId: string, emoji: string) => {
+    onReactMessage(messageId, emoji, getActiveRecipientId());
+    setReactionPickerMessageId(null);
   };
 
   // Extract active DM lists to display tabs for
@@ -327,16 +337,18 @@ export default function MessageBoard({
                         {msg.senderName}
                       </span>
                     )}
-                    <span className="text-[9px] text-slate-400 font-medium">
-                      {formattedTime}
-                    </span>
+                    {!belongsToMe && (
+                      <span className="text-[9px] text-slate-400 font-medium">
+                        {formattedTime}
+                      </span>
+                    )}
                   </div>
                   
                   <div className={`flex items-end gap-1.5 ${belongsToMe ? "flex-row-reverse" : ""}`}>
                     <div 
-                      className={`px-3 py-2 rounded-2xl max-w-[85%] text-xs shadow-sm break-words space-y-2 ${
+                      className={`px-4 py-2 rounded-2xl max-w-[95%] sm:max-w-[92%] text-sm shadow-sm break-words space-y-2 ${
                         belongsToMe 
-                          ? "bg-slate-900 text-white rounded-tr-none" 
+                          ? "bg-emerald-800 text-white rounded-tr-none" 
                           : "bg-white text-slate-800 rounded-tl-none border border-slate-100"
                       }`}
                     >
@@ -390,18 +402,42 @@ export default function MessageBoard({
                               />
                             </a>
                           )}
-                          {msg.text && <p className="leading-relaxed">{msg.text}</p>}
-                          {msg.editedAt && (
-                            <p className={`text-[9px] ${belongsToMe ? "text-slate-300" : "text-slate-400"}`}>
-                              modifié
-                            </p>
-                          )}
+                          {msg.text && <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                          <div className={`flex items-center justify-end gap-1 text-[10px] ${belongsToMe ? "text-emerald-100/80" : "text-slate-400"}`}>
+                            {msg.editedAt && <span>modifié</span>}
+                            <span>{formattedTime}</span>
+                          </div>
                         </>
                       )}
                     </div>
 
-                    {belongsToMe && !msg.deleted && !isEditingThis && (
-                      <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
+                    {!msg.deleted && !isEditingThis && (
+                      <div className="relative flex items-center gap-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
+                        {reactionPickerMessageId === msg.id && (
+                          <div className={`absolute bottom-8 z-20 flex gap-1 rounded-full border border-slate-200 bg-white p-1.5 shadow-xl ${belongsToMe ? "right-0" : "left-0"}`}>
+                            {MESSAGE_REACTIONS.map(emoji => (
+                              <button
+                                key={emoji}
+                                type="button"
+                                onClick={() => reactToMessage(msg.id, emoji)}
+                                className="flex h-7 w-7 items-center justify-center rounded-full text-base hover:bg-slate-100"
+                                title={`Réagir ${emoji}`}
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setReactionPickerMessageId(prev => prev === msg.id ? null : msg.id)}
+                          className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 shadow-sm hover:text-emerald-600"
+                          title="Réagir"
+                        >
+                          <Smile className="h-3.5 w-3.5" />
+                        </button>
+                        {belongsToMe && (
+                          <>
                         <button
                           type="button"
                           onClick={() => startEditingMessage(msg)}
@@ -418,9 +454,31 @@ export default function MessageBoard({
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
+                          </>
+                        )}
                       </div>
                     )}
                   </div>
+
+                  {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                    <div className={`mt-1 flex flex-wrap gap-1 ${belongsToMe ? "justify-end" : "justify-start"}`}>
+                      {Object.entries(msg.reactions).map(([emoji, userIds]) => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          onClick={() => reactToMessage(msg.id, emoji)}
+                          className={`rounded-full border px-2 py-0.5 text-[11px] shadow-sm ${
+                            userIds.includes(currentUser.userId)
+                              ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                              : "border-slate-200 bg-white text-slate-600"
+                          }`}
+                          title="Cliquer pour ajouter ou retirer votre réaction"
+                        >
+                          {emoji} {userIds.length}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })
